@@ -237,8 +237,23 @@ class SlidingWindowConversationManager(ConversationManager):
             # pair-safe boundary instead — a cut that splits no toolUse/toolResult pair, even
             # when the pair is non-adjacent (assistant text interleaved between use and result).
             # The search starts one past start_index because the retained user anchor (found or
-            # synthesized below) occupies one slot of the window.
+            # synthesized below) occupies one slot of the window. Pinned messages inside the trim
+            # range are kept too, so the boundary is pushed further until removing the range
+            # actually shrinks the history below the window.
             boundary = self._find_pair_safe_boundary(messages, start_index + 1)
+            for _ in range(len(messages)):
+                if boundary >= len(messages):
+                    break
+                pinned_in_range = sum(1 for i in range(boundary) if is_pinned(messages, i))
+                needed = start_index + 1 + pinned_in_range
+                if boundary >= needed:
+                    break
+                boundary = self._find_pair_safe_boundary(messages, needed)
+            if boundary >= len(messages):
+                # The strict search (anchor slot + retained pins accounted for) found nothing.
+                # Any pair-safe cut at start_index still shrinks the history, even if the result
+                # lands slightly above the window — which beats declining and growing unbounded.
+                boundary = self._find_pair_safe_boundary(messages, start_index)
             if boundary < len(messages):
                 fallback_user_index = self._find_tool_pair_user_anchor(messages, boundary)
                 if fallback_user_index is not None:
@@ -292,14 +307,28 @@ class SlidingWindowConversationManager(ConversationManager):
             del messages[i]
 
         if synthesize_anchor:
+            # The synthetic anchor stands in for the user message that would have anchored the
+            # tail. When a user-first pinned prefix is retained, it belongs at the seam between
+            # the pins and the kept tail (restoring alternation); otherwise it goes first so the
+            # history opens with a user message.
             first = messages[0] if messages else None
             first_is_plain_user = (
                 first is not None
                 and first["role"] == "user"
                 and not any("toolResult" in content for content in first["content"])
             )
-            if not first_is_plain_user:
-                messages.insert(0, {"role": "user", "content": [{"text": "[earlier conversation trimmed]"}]})
+            insert_at = 0
+            if first_is_plain_user:
+                while insert_at < len(messages) and is_pinned(messages, insert_at):
+                    insert_at += 1
+            seam = messages[insert_at] if insert_at < len(messages) else None
+            seam_is_plain_user = (
+                seam is not None
+                and seam["role"] == "user"
+                and not any("toolResult" in content for content in seam["content"])
+            )
+            if not seam_is_plain_user:
+                messages.insert(insert_at, {"role": "user", "content": [{"text": "[earlier conversation trimmed]"}]})
 
     def _find_pair_safe_boundary(self, messages: Messages, start_index: int) -> int:
         """Find the nearest pair-safe boundary at or after ``start_index``.
