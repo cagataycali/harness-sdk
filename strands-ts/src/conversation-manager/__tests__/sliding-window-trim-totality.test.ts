@@ -11,6 +11,7 @@ import { SlidingWindowConversationManager } from '../sliding-window-conversation
 import { Message, TextBlock, ToolUseBlock, ToolResultBlock } from '../../index.js'
 import { pinMessage } from '../compression/pin-message.js'
 import type { Agent } from '../../agent/agent.js'
+import type { Model } from '../../models/model.js'
 
 const WINDOW = 120
 
@@ -94,6 +95,11 @@ function asAgent(messages: Message[]): Agent {
   return { messages } as unknown as Agent
 }
 
+/** reduce() options for a manager that never touches the model (sliding window). */
+function reduceOpts(messages: Message[]): { agent: Agent; model: Model } {
+  return { agent: asAgent(messages), model: undefined as unknown as Model }
+}
+
 function expectUserFirst(messages: Message[]): void {
   const first = messages[0]!
   expect(first.role).toBe('user')
@@ -137,7 +143,7 @@ function countOrphanedUses(messages: Message[]): number {
 /** Emulate _applyManagement's loop: reduce while over the window, asserting termination. */
 function reduceToFixedPoint(manager: SlidingWindowConversationManager, messages: Message[], windowSize: number): void {
   for (let round = 0; round < 10 && messages.length > windowSize; round++) {
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
   }
   expect(messages.length).toBeLessThanOrEqual(windowSize)
 }
@@ -150,7 +156,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     const messages = buildS1()
     expect(messages.length).toBe(174)
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     expect(messages.length).toBeLessThanOrEqual(WINDOW)
     expectUserFirst(messages)
@@ -179,7 +185,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     const manager = new SlidingWindowConversationManager({ windowSize: WINDOW })
     const messages = buildS2()
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     expect(messages.length).toBeLessThanOrEqual(WINDOW)
     expectUserFirst(messages)
@@ -197,7 +203,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     const lastId = (messages[messages.length - 1]!.content.find((b) => b.type === 'toolUseBlock') as ToolUseBlock)
       .toolUseId
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     expect(messages.length).toBeLessThanOrEqual(WINDOW)
     expectUserFirst(messages)
@@ -213,7 +219,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     // assistant-first prefix: pinned run is not user-first alternating
     const messages = [assistantText('system-ish assistant note'), assistantText('another note'), ...buildS1(172)]
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     // Pinned messages are retained…
     const texts = messages.map((m) => (m.content[0] as TextBlock).text ?? '')
@@ -238,7 +244,7 @@ describe('sliding window trim totality (S1–S7)', () => {
       assistantText('a3'),
     ]
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(false)
+    expect(manager.reduce(reduceOpts(messages))).toBe(false)
     expect(messages.length).toBe(6)
   })
 
@@ -247,7 +253,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     const messages = buildS7()
     const anchorText = (messages[0]!.content[0] as TextBlock).text
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     // The historical off-by-one left windowSize+1 messages and re-triggered management forever.
     expect(messages.length).toBeLessThanOrEqual(WINDOW)
@@ -261,7 +267,7 @@ describe('sliding window trim totality (S1–S7)', () => {
     const messages = buildS7(20)
     pinMessage(messages, 0)
 
-    expect(manager.reduce({ agent: asAgent(messages) })).toBe(true)
+    expect(manager.reduce(reduceOpts(messages))).toBe(true)
 
     expect(messages.length).toBe(1)
     expect((messages[0]!.content[0] as TextBlock).text).toBe('Go mine some iron.')
