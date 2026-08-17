@@ -1,0 +1,37 @@
+# repro.py — SlidingWindowConversationManager, window=120
+
+## S1 FIXTURE (TS-serialized real crash shape, e=None routine management)
+before: len=174 plainUserMsgs=1 window_size=120 e=None
+round 1: reduced=False after: len=174 plainUserMsgs=1
+  log: WARNING window_size=<120>, message_count=<174> | unable to trim conversation context, no valid trim point found
+round 2: reduced=False after: len=177 plainUserMsgs=1
+  log: WARNING window_size=<120>, message_count=<177> | unable to trim conversation context, no valid trim point found
+round 3: reduced=False after: len=180 plainUserMsgs=1
+  log: WARNING window_size=<120>, message_count=<180> | unable to trim conversation context, no valid trim point found
+post-trim first message: role=user blocks=[text] | over-window=True
+
+## S1 FIXTURE with e set (reactive overflow recovery)
+before: len=174 plainUserMsgs=1 window_size=120 e=set
+round 1: RAISED ContextWindowOverflowException: Unable to trim conversation context!
+  log: DEBUG message_index=<4> | found message with tool results at index
+post-trim first message: role=user blocks=[text] | over-window=True
+
+## S2 adjacent pairs, no plain user anywhere (PY fallback trims w/o anchor)
+before: len=174 plainUserMsgs=0 window_size=120 e=None
+round 1: reduced=True after: len=120 plainUserMsgs=0
+  log: DEBUG trim_index=<54> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+round 2: reduced=True after: len=118 plainUserMsgs=0
+  log: DEBUG trim_index=<2> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+round 3: reduced=True after: len=116 plainUserMsgs=0
+  log: DEBUG trim_index=<2> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+post-trim first message: role=assistant blocks=[text,toolUse] | over-window=False
+
+## S7 plain agentic shape
+before: len=174 plainUserMsgs=1 window_size=120 e=None
+round 1: reduced=True after: len=119 plainUserMsgs=0
+  log: DEBUG trim_index=<55> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+round 2: reduced=True after: len=117 plainUserMsgs=0
+  log: DEBUG trim_index=<2> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+round 3: reduced=True after: len=115 plainUserMsgs=0
+  log: DEBUG trim_index=<2> | no plain user message trim point found, falling back to assistant(toolUse) + user(toolResult) boundary
+post-trim first message: role=assistant blocks=[toolUse] | over-window=False

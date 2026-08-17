@@ -56,3 +56,19 @@ Decision tree (`reduce_context` :196-274):
 7. **S7 off-by-one**: anchor fallback success leaves windowSize+1 messages (TS).
 
 *(B/C/D/E sections to follow: repro harnesses, fixture, fix, tests, e2e evidence.)*
+
+## B. Reproduction results (repro.ts / repro.py, fixture: fixtures/messages-174.json)
+
+| Shape | TS outcome | PY outcome |
+|---|---|---|
+| S1 fixture (174 msgs, tail = toolUse / assistant-text / toolResult triples, no plain user in tail) | **exact user WARN**, `reduced=false`, grows 174→177→180 | **same WARN** (e=None); **raises ContextWindowOverflowException** (e set) |
+| S2 adjacent pairs, zero plain user | silent DEBUG "declining fallback", `reduced=false`, unbounded growth | trims to 120 BUT history starts `assistant(toolUse)` — invalid user-first prefix |
+| S3 = S1 + trailing orphaned toolUse | same WARN as S1 | (same class as S1) |
+| S4 pinFirst over assistant-first prefix | silent decline, unbounded growth | n/a (no anchor concept) |
+| S7 plain agentic (anchor exists) | trims 174→120 = windowSize+1? (here exactly 120; anchor+tail) | trims to 119 but **discards the plain user anchor** → assistant-first prefix |
+
+Key parity findings:
+- The unbounded-growth stall is present in BOTH SDKs for S1-class histories (no plain user AND no adjacent pair after startIndex).
+- TS additionally stalls on S2/S4 (anchor decline — silent, debug-level only).
+- PY additionally emits provider-invalid assistant-first histories on S2/S7 (the exact problem the TS anchor was built to avoid), and hard-raises on S1 during reactive overflow recovery.
+- `echo` of the real error: run `node_modules/.bin/tsx sliding-window-dive/repro.ts` from repo root; `sliding-window-dive/.venv/bin/python sliding-window-dive/repro.py` (venv: uv venv + `uv pip install -e strands-py`).

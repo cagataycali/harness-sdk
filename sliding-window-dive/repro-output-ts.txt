@@ -1,0 +1,53 @@
+# repro.ts — SlidingWindowConversationManager, window=120
+
+## S1 no-plain-user + no-adjacent-pair (REAL CRASH SHAPE)
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=false after: len=174 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<174> | unable to trim conversation context, no valid trim point found
+round 2: reduced=false after: len=177 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<177> | unable to trim conversation context, no valid trim point found
+round 3: reduced=false after: len=180 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<180> | unable to trim conversation context, no valid trim point found
+post-trim first message: role=user blocks=[textBlock] | over-window=true
+
+## S2 adjacent pairs, no plain user anywhere (anchor missing)
+before: len=174 plainUserMsgs=0 windowSize=120
+round 1: reduced=false after: len=174 plainUserMsgs=0
+  log: DEBUG window_size=<120>, trim_index=<54> | complete tool pair found but no valid user anchor, declining fallback
+round 2: reduced=false after: len=177 plainUserMsgs=0
+  log: DEBUG window_size=<120>, trim_index=<58> | complete tool pair found but no valid user anchor, declining fallback
+round 3: reduced=false after: len=180 plainUserMsgs=0
+  log: DEBUG window_size=<120>, trim_index=<60> | complete tool pair found but no valid user anchor, declining fallback
+post-trim first message: role=assistant blocks=[textBlock,toolUseBlock] | over-window=true
+
+## S3 S1 + trailing orphaned toolUse
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=false after: len=174 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<174> | unable to trim conversation context, no valid trim point found
+round 2: reduced=false after: len=177 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<177> | unable to trim conversation context, no valid trim point found
+round 3: reduced=false after: len=180 plainUserMsgs=1
+  log: WARN window_size=<120>, messages=<180> | unable to trim conversation context, no valid trim point found
+post-trim first message: role=user blocks=[textBlock] | over-window=true
+
+## S4 pinFirst=2 over assistant-first prefix
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=false after: len=174 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<54> | complete tool pair found but no valid user anchor, declining fallback
+round 2: reduced=false after: len=177 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<58> | complete tool pair found but no valid user anchor, declining fallback
+round 3: reduced=false after: len=180 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<60> | complete tool pair found but no valid user anchor, declining fallback
+post-trim first message: role=assistant blocks=[textBlock] | over-window=true
+
+## S7 plain agentic (anchor works) — off-by-one check
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=true after: len=120 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<55>, user_anchor_index=<0> | no plain user trim point, falling back to complete tool pair
+round 2: reduced=true after: len=118 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to complete tool pair
+round 3: reduced=true after: len=116 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to complete tool pair
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+fixture written: fixtures/messages-174.json (174 messages)
