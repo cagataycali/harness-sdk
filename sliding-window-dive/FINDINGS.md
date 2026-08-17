@@ -93,6 +93,75 @@ All four confirmed bugs share ONE structural root cause plus three local defects
 3. Boundedness: post-trim `len ≤ windowSize`; repeated invocation is a fixed point, not a treadmill.
 4. Semantics preserved: `windowSize=0` keeps pinned-only; `pinFirst` prefix retained; pin partner-protection respected; reactive path (`error` set) still tries toolResult truncation first.
 
+## D. The fix — total, provider-valid reduction (both SDKs)
+
+**TS** `202a732fe` (sliding-window-conversation-manager.ts) · **PY** `4c68fa19d` + `bf6d110c1` (sliding_window_conversation_manager.py) — same algorithm, per-SDK idiom:
+
+1. **Pair-safe boundary instead of adjacency search.** When no plain-user trim point
+   exists, find the earliest index `>= startIndex` that does not split any
+   toolUse/toolResult pair (a boundary where every toolUse before it has its result
+   before it) — non-adjacent pairs (S1) are handled by construction. Pins retained
+   inside the trim range push the boundary forward so they don't eat the removal budget.
+2. **User anchor: reuse or synthesize.** Keep the nearest plain user message before the
+   boundary as the window's opener (S7 keeps the real anchor). When none exists (S2/S4),
+   synthesize `user: "[earlier conversation trimmed]"` — placed at the seam after a
+   retained user-first pinned prefix, or first otherwise. Post-trim history is
+   user-first by construction; PY's assistant-first divergence is gone.
+3. **Anchor counts against the window** — post-trim `len <= windowSize`, fixed point
+   (kills the TS off-by-one treadmill).
+4. **Relaxed boundary retry** — at tiny windows where the strict pins-aware search
+   overshoots to end-of-history, retry from `startIndex` and accept a slightly-over-window
+   cut (reducing beats declining; the next pass converges).
+5. **Semantics kept:** `windowSize=0` → pinned-only; all-pinned range still refuses
+   (TS warn+false / PY quiet on `e=None`, raise on reactive); reactive path still tries
+   toolResult truncation first; pin partner-protection respected.
+
+Verified by re-running the milestone-B repros against the fixed SDKs
+(`repro-output-{ts,py}-fixed.txt`): every S-shape reduces, user-first, zero warns,
+bounded across repeated rounds.
+
+## F. End-to-end proof (real agent loops)
+
+- **Python** `sliding-window-dive/e2e_py.py` (`6a683d58a`): real `Agent` + real tool
+  execution + `MockedModelProvider`, 3 turns x 40 tool cycles, window 120. Instrumented
+  manager: raw history peaked **164 > 120**, reduction engaged 2x, **0 stall warnings**,
+  bounded + provider-valid after every turn, every turn completed.
+- **TypeScript** `strands-ts/src/agent/__tests__/agent.sliding-window-e2e.test.ts`
+  (`41fb7a20d`): same scenario via `MockMessageModel` + `createMockTool`, runs in the
+  repo's vitest suite. Instruments the routine-management path (private
+  `_applyManagement` on `AfterInvocationEvent` — `reduce()` only serves overflow
+  recovery and token-threshold compression). Window crossing + reductions proven,
+  0 stall warns, bounded + provider-valid throughout.
+
+## How to reproduce the original issue (and verify the fix)
+
+The fixture `fixtures/messages-174.json` is a 174-message agent history in the exact
+incident shape (window 120, tool-heavy tail, no plain user message in the trimmable
+range — S1). From the repo root:
+
+```bash
+# TypeScript — before the fix: the verbatim WARN + unbounded growth; after: reduces to <=120
+cd strands-ts && npm install && cd ..
+strands-ts/node_modules/.bin/tsx sliding-window-dive/repro.ts
+
+# Python — before: same WARN (proactive) / ContextWindowOverflowException (reactive); after: reduces
+uv venv sliding-window-dive/.venv && uv pip install -e strands-py --python sliding-window-dive/.venv/bin/python
+sliding-window-dive/.venv/bin/python sliding-window-dive/repro.py
+
+# End-to-end
+sliding-window-dive/.venv/bin/python sliding-window-dive/e2e_py.py
+cd strands-ts && npx vitest run --project unit-node src/agent/__tests__/agent.sliding-window-e2e.test.ts
+```
+
+Captured pre-fix outputs: `repro-output-ts.txt` / `repro-output-py.txt` (checked in).
+
+## Final state
+
+Branch `fix/sliding-window-no-valid-trim-point` (fork `cagataycali/harness-sdk`), 17 commits:
+A code-path map -> B repros + fixture -> C root cause -> D fixes (TS+PY) -> E totality
+suites + full regression (TS 4145/4145, PY agent dir 748/748) -> F end-to-end agent-loop
+proof (both SDKs). No commits to upstream, no PR opened, per instructions.
+
 ## E2 — full strands-ts suite after the fix (2026-08-17)
 
 `npx vitest run --project unit-node`: **147 files, 4145/4145 tests passed, 0 type errors.**
