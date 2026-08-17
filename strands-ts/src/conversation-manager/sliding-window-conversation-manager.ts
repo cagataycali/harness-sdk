@@ -242,8 +242,19 @@ export class SlidingWindowConversationManager extends ConversationManager {
       // pair-safe boundary instead — a cut that splits no toolUse/toolResult pair, even
       // when the pair is non-adjacent (assistant text interleaved between use and result).
       // The search starts one past startIndex because the retained user anchor (found or
-      // synthesized below) occupies one slot of the window.
-      const boundary = this._findPairSafeBoundary(messages, startIndex + 1)
+      // synthesized below) occupies one slot of the window. Pinned messages inside the trim
+      // range are kept too, so the boundary is pushed further until removing the range
+      // actually shrinks the history below the window.
+      let boundary = this._findPairSafeBoundary(messages, startIndex + 1)
+      for (let guard = 0; guard < messages.length && boundary < messages.length; guard++) {
+        let pinnedInRange = 0
+        for (let i = 0; i < boundary; i++) {
+          if (isPinned(messages, i)) pinnedInRange++
+        }
+        const needed = startIndex + 1 + pinnedInRange
+        if (boundary >= needed) break
+        boundary = this._findPairSafeBoundary(messages, needed)
+      }
       if (boundary < messages.length) {
         fallbackUserIndex = this._findToolPairUserAnchor(messages, boundary)
         if (fallbackUserIndex !== undefined) {
