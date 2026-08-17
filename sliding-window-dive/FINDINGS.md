@@ -92,3 +92,24 @@ All four confirmed bugs share ONE structural root cause plus three local defects
 2. Provider validity: post-trim history starts with a `user` message whose content has no toolResult blocks; no orphaned toolUse/toolResult anywhere.
 3. Boundedness: post-trim `len ≤ windowSize`; repeated invocation is a fixed point, not a treadmill.
 4. Semantics preserved: `windowSize=0` keeps pinned-only; `pinFirst` prefix retained; pin partner-protection respected; reactive path (`error` set) still tries toolResult truncation first.
+
+## E2 — full strands-ts suite after the fix (2026-08-17)
+
+`npx vitest run --project unit-node`: **147 files, 4145/4145 tests passed, 0 type errors.**
+
+The suite drove three refinements beyond the initial fix:
+1. **Pin-aware fallback boundary** (found by new S4 test): pins retained inside the trim
+   range ate the removal budget — history stuck at windowSize+2 forever. Boundary now
+   pushes forward by the number of pins it keeps.
+2. **Relaxed boundary retry** (found by `uses the pinned first user as a safe fallback anchor`):
+   at tiny windows the strict anchor+pins-aware search can overshoot to end-of-history;
+   retrying from startIndex accepts a slightly-over-window cut, which beats declining.
+3. **Seam-aware synthetic anchor** (found by `declines fallback when a pinned prefix ends
+   with an assistant message`): the synthetic anchor is placed between a retained
+   user-first pinned prefix and the tail, restoring role alternation; it only goes first
+   when the history would not otherwise open with a user message.
+
+7 tests in `sliding-window-conversation-manager.test.ts` asserted `reduce() === false`
+(decline) for trimmable tool-heavy shapes — the precise behavior under fix. Rewritten to
+the total-reduction contract (each outcome hand-simulated first); legitimate
+un-trimmability (all-pinned range, minimal anchor+pair history) still refuses.
