@@ -113,3 +113,16 @@ The suite drove three refinements beyond the initial fix:
 (decline) for trimmable tool-heavy shapes — the precise behavior under fix. Rewritten to
 the total-reduction contract (each outcome hand-simulated first); legitimate
 un-trimmability (all-pinned range, minimal anchor+pair history) still refuses.
+
+## E3–E5 — Python parity + suites (2026-08-17)
+
+- All three refinements ported to `strands-py` (pin-aware boundary, relaxed retry,
+  seam-aware synthetic anchor) — behavior parity with TS.
+- One legacy test updated: `test_sliding_window_tool_heavy_conversation_falls_back_to_tool_pair_boundary`
+  asserted an **assistant-first** post-trim history (the S7 provider-invalid divergence);
+  now expects the retained user anchor.
+- New `tests/strands/agent/conversation_manager/test_sliding_window_trim_totality.py`
+  mirrors the TS S1–S7 suite (9 tests). Semantics note: PY's proactive path (`e=None`)
+  declines **quietly** on an all-pinned range; the reactive path re-raises — both asserted.
+- `pytest tests/strands/agent`: **748/748 passed** (test_a2a_agent.py skipped:
+  pre-existing missing optional `a2a` dependency, unrelated).
