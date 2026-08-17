@@ -229,20 +229,36 @@ class SlidingWindowConversationManager(ConversationManager):
         # 2. Does not start with an orphaned toolResult
         # 3. Does not start with a toolUse unless its toolResult immediately follows
         trim_index = find_valid_trim_point(messages, start_index)
+        fallback_user_index: int | None = None
+        synthesize_anchor = False
 
         if trim_index >= len(messages):
-            # No plain user message found. Fall back to an assistant(toolUse) + user(toolResult)
-            # boundary if one exists: providers treat a complete toolUse/toolResult pair as a valid
-            # conversation continuation, and without this fallback tool-heavy conversations cannot be
-            # trimmed. (This fallback is Python-specific and has no equivalent in find_valid_trim_point.)
-            fallback_trim_index = self._find_tool_pair_trim_point(messages, start_index)
-            if fallback_trim_index is not None:
-                logger.debug(
-                    "trim_index=<%s> | no plain user message trim point found, "
-                    "falling back to assistant(toolUse) + user(toolResult) boundary",
-                    fallback_trim_index,
-                )
-                trim_index = fallback_trim_index
+            # No plain user message found at/after start_index. Fall back to the nearest
+            # pair-safe boundary instead — a cut that splits no toolUse/toolResult pair, even
+            # when the pair is non-adjacent (assistant text interleaved between use and result).
+            # The search starts one past start_index because the retained user anchor (found or
+            # synthesized below) occupies one slot of the window.
+            boundary = self._find_pair_safe_boundary(messages, start_index + 1)
+            if boundary < len(messages):
+                fallback_user_index = self._find_tool_pair_user_anchor(messages, boundary)
+                if fallback_user_index is not None:
+                    logger.debug(
+                        "trim_index=<%s>, user_anchor_index=<%s> | no plain user trim point, "
+                        "falling back to pair-safe boundary",
+                        boundary,
+                        fallback_user_index,
+                    )
+                else:
+                    # No plain user message survives the trim (and no valid pinned prefix exists).
+                    # Synthesize a minimal user anchor after trimming instead of giving up: giving
+                    # up leaves the history permanently above the window size (or re-raises the
+                    # overflow the caller asked us to recover from).
+                    synthesize_anchor = True
+                    logger.debug(
+                        "trim_index=<%s> | no plain user anchor available, synthesizing trim anchor",
+                        boundary,
+                    )
+                trim_index = boundary
             elif e is not None:
                 raise ContextWindowOverflowException("Unable to trim conversation context!") from e
             else:
@@ -254,8 +270,10 @@ class SlidingWindowConversationManager(ConversationManager):
                 )
                 return
 
-        # Collect non-pinned indices in [0, trim_index) to remove
-        indices_to_remove = [i for i in range(trim_index) if not is_pinned(messages, i)]
+        # Collect non-pinned indices in [0, trim_index) to remove, keeping the user anchor if any
+        indices_to_remove = [
+            i for i in range(trim_index) if i != fallback_user_index and not is_pinned(messages, i)
+        ]
 
         if not indices_to_remove:
             if e is not None:
@@ -273,29 +291,94 @@ class SlidingWindowConversationManager(ConversationManager):
         for i in reversed(indices_to_remove):
             del messages[i]
 
-    def _find_tool_pair_trim_point(self, messages: Messages, start_index: int) -> int | None:
-        """Find the first assistant(toolUse) + user(toolResult) boundary at or after ``start_index``.
+        if synthesize_anchor:
+            first = messages[0] if messages else None
+            first_is_plain_user = (
+                first is not None
+                and first["role"] == "user"
+                and not any("toolResult" in content for content in first["content"])
+            )
+            if not first_is_plain_user:
+                messages.insert(0, {"role": "user", "content": [{"text": "[earlier conversation trimmed]"}]})
 
-        Used as a fallback when :func:`find_valid_trim_point` finds no plain user message. Providers
-        treat a complete toolUse/toolResult pair as a valid conversation continuation, so trimming to
-        such a boundary keeps tool-heavy conversations trimmable. This has no equivalent in
-        ``find_valid_trim_point`` (whose behavior mirrors the TypeScript SDK).
+    def _find_pair_safe_boundary(self, messages: Messages, start_index: int) -> int:
+        """Find the nearest pair-safe boundary at or after ``start_index``.
+
+        A boundary ``k`` is pair-safe when trimming ``messages[0:k)`` splits no tool use/result
+        pair: every toolResult kept at ``[k:]`` has its toolUse kept too. Unlike an adjacency
+        scan, this accepts non-adjacent pairs (assistant text interleaved between a toolUse and
+        its toolResult), which are provider-valid histories. A toolResult whose toolUse is
+        missing from the history entirely also blocks the boundary, since keeping it would
+        orphan it.
 
         Args:
             messages: The full conversation message history.
             start_index: The index to begin searching from.
 
         Returns:
-            The index of the first qualifying assistant(toolUse) message, or ``None`` if none exists.
+            The first pair-safe index, or ``len(messages)`` if none exists.
         """
-        for index in range(start_index, len(messages)):
-            if (
-                any("toolUse" in content for content in messages[index]["content"])
-                and index + 1 < len(messages)
-                and messages[index + 1]["role"] == "user"
-                and any("toolResult" in content for content in messages[index + 1]["content"])
-            ):
-                return index
+        use_index: dict[str, int] = {}
+        result_index: dict[str, int] = {}
+        for i, message in enumerate(messages):
+            for content in message["content"]:
+                if "toolUse" in content:
+                    use_index[content["toolUse"]["toolUseId"]] = i
+                elif "toolResult" in content:
+                    result_index[content["toolResult"]["toolUseId"]] = i
+
+        for k in range(start_index, len(messages)):
+            safe = True
+            for tool_use_id, result_idx in result_index.items():
+                if result_idx < k:
+                    continue
+                use_idx = use_index.get(tool_use_id)
+                if use_idx is None or use_idx < k:
+                    safe = False
+                    break
+            if safe:
+                return k
+
+        return len(messages)
+
+    def _find_tool_pair_user_anchor(self, messages: Messages, boundary: int) -> int | None:
+        """Find a user message that can remain immediately before a fallback trim boundary.
+
+        Pinned messages must already form a user-first alternating prefix that ends with a user
+        message. Without a pinned prefix, the most recent plain user message before the boundary
+        is retained as the conversation anchor, preserving a user-first history for providers
+        that require it. Mirrors the TypeScript SDK's anchor selection.
+
+        Args:
+            messages: The full conversation message history.
+            boundary: The trim boundary index the anchor must precede.
+
+        Returns:
+            The user message index to preserve, or ``None`` when no valid anchor exists
+            (the caller synthesizes one instead).
+        """
+        pinned_indices = [i for i in range(boundary) if is_pinned(messages, i)]
+
+        if pinned_indices:
+            first = messages[pinned_indices[0]]
+            if first["role"] != "user" or any("toolResult" in content for content in first["content"]):
+                return None
+            for prev, cur in zip(pinned_indices, pinned_indices[1:], strict=False):
+                if messages[cur]["role"] == messages[prev]["role"]:
+                    return None
+            last = messages[pinned_indices[-1]]
+            if last["role"] != "user" or any("toolUse" in content for content in last["content"]):
+                return None
+            return pinned_indices[-1]
+
+        for index in range(boundary - 1, -1, -1):
+            message = messages[index]
+            if message["role"] != "user":
+                continue
+            if any("toolUse" in content or "toolResult" in content for content in message["content"]):
+                continue
+            return index
+
         return None
 
     def _truncate_tool_results(self, messages: Messages, msg_idx: int) -> bool:
