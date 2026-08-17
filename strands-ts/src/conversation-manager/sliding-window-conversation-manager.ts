@@ -255,6 +255,12 @@ export class SlidingWindowConversationManager extends ConversationManager {
         if (boundary >= needed) break
         boundary = this._findPairSafeBoundary(messages, needed)
       }
+      if (boundary === messages.length) {
+        // The strict search (anchor slot + retained pins accounted for) found nothing.
+        // Any pair-safe cut at startIndex still shrinks the history, even if the result
+        // lands slightly above the window — which beats declining and growing unbounded.
+        boundary = this._findPairSafeBoundary(messages, startIndex)
+      }
       if (boundary < messages.length) {
         fallbackUserIndex = this._findToolPairUserAnchor(messages, boundary)
         if (fallbackUserIndex !== undefined) {
@@ -303,11 +309,26 @@ export class SlidingWindowConversationManager extends ConversationManager {
     }
 
     if (synthesizeAnchor) {
+      // The synthetic anchor stands in for the user message that would have anchored the
+      // tail. When a user-first pinned prefix is retained, it belongs at the seam between
+      // the pins and the kept tail (restoring alternation); otherwise it goes first so the
+      // history opens with a user message.
       const first = messages[0]
       const firstIsPlainUser =
         first?.role === 'user' && !first.content.some((block) => block.type === 'toolResultBlock')
-      if (!firstIsPlainUser) {
-        messages.unshift(new Message({ role: 'user', content: [new TextBlock('[earlier conversation trimmed]')] }))
+      let insertAt = 0
+      if (firstIsPlainUser) {
+        while (insertAt < messages.length && isPinned(messages, insertAt)) insertAt++
+      }
+      const seam = messages[insertAt]
+      const seamIsPlainUser =
+        seam?.role === 'user' && !seam.content.some((block) => block.type === 'toolResultBlock')
+      if (!seamIsPlainUser) {
+        messages.splice(
+          insertAt,
+          0,
+          new Message({ role: 'user', content: [new TextBlock('[earlier conversation trimmed]')] })
+        )
       }
     }
     return true
