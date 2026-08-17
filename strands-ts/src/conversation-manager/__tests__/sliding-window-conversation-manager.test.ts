@@ -1079,12 +1079,15 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // startIndex=2 reaches only a user tool message and an orphaned result, so fallback must decline.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // The pair inside the user message is never split: the pair-safe boundary lands past it
+      // (index 4), the plain user at index 0 anchors the tail, and the orphaned result is trimmed.
+      expect(result).toBe(true)
+      expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'assistant'])
+      expect(messages[0]!.content[0]).toEqual(expect.objectContaining({ type: 'textBlock', text: 'Anchor' }))
+      expect(messages.every((message) => message.content.every((block) => block.type === 'textBlock'))).toBe(true)
     })
 
-    it('returns false when an assistant tool use is not followed by a tool result', () => {
+    it('reduces past an unpaired assistant tool use instead of failing', () => {
       const manager = new SlidingWindowConversationManager({ windowSize: 4, shouldTruncateResults: false })
       const messages = [
         new Message({ role: 'user', content: [new TextBlock('Anchor')] }),
@@ -1105,9 +1108,15 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // startIndex=2 has an assistant tool use, but index 3 is not a tool result.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // There are no tool results anywhere, so every boundary is pair-safe: the orphaned
+      // assistant toolUse (id-1) is trimmed and the plain user at index 0 anchors the tail.
+      expect(result).toBe(true)
+      expect(messages).toHaveLength(4)
+      expect(messages[0]!.content[0]).toEqual(expect.objectContaining({ type: 'textBlock', text: 'Anchor' }))
+      const remainingUses = messages.flatMap((message) =>
+        message.content.filter((block) => block.type === 'toolUseBlock')
+      ) as ToolUseBlock[]
+      expect(remainingUses.map((block) => block.toolUseId)).toEqual(['id-2'])
     })
 
     it('uses the pinned first user as a safe fallback anchor', () => {
@@ -1142,7 +1151,7 @@ describe('SlidingWindowConversationManager', () => {
       ])
     })
 
-    it('declines fallback when a pinned prefix ends with an assistant message', () => {
+    it('synthesizes a seam anchor when a pinned prefix ends with an assistant message', () => {
       const manager = new SlidingWindowConversationManager({
         windowSize: 2,
         shouldTruncateResults: false,
@@ -1167,27 +1176,23 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // Appending fallback index 5 after the pinned assistant would create adjacent assistant messages.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
-      expect(messages.map((message) => message.role)).toEqual([
-        'user',
-        'assistant',
-        'user',
-        'assistant',
-        'user',
-        'assistant',
-        'user',
-      ])
+      // A synthetic user anchor is inserted at the seam between the pinned prefix and the
+      // kept pair, restoring alternation instead of declining and growing unbounded.
+      expect(result).toBe(true)
+      expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user'])
+      expect(messages[2]!.content[0]).toEqual(
+        expect.objectContaining({ type: 'textBlock', text: '[earlier conversation trimmed]' })
+      )
+      expect(messages[3]!.content[0]).toEqual(expect.objectContaining({ type: 'toolUseBlock', toolUseId: 'id-2' }))
       expect(debugSpy).toHaveBeenCalledWith(
-        'window_size=<2>, trim_index=<5> | complete tool pair found but no valid user anchor, declining fallback'
+        'window_size=<2>, trim_index=<5> | no plain user anchor available, synthesizing trim anchor'
       )
       expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('no valid trim point found'))
       debugSpy.mockRestore()
       warnSpy.mockRestore()
     })
 
-    it('declines fallback when non-contiguous pinned messages do not alternate', async () => {
+    it('synthesizes an anchor when non-contiguous pinned messages do not alternate', async () => {
       const { pinMessage } = await import('../compression/pin-message.js')
       const manager = new SlidingWindowConversationManager({ windowSize: 2, shouldTruncateResults: false })
       const messages = [
@@ -1211,12 +1216,19 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // Removing the unpinned assistant at index 1 would make the pinned users adjacent.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // The non-alternating pinned pair cannot serve as the anchor prefix, so a synthetic
+      // user anchor is inserted at the seam. Both pins survive; the recent pair stays intact.
+      expect(result).toBe(true)
+      expect(messages.map((message) => message.role)).toEqual(['user', 'user', 'user', 'assistant', 'user'])
+      expect(messages[0]!.content[0]).toEqual(expect.objectContaining({ type: 'textBlock', text: 'Pinned user one' }))
+      expect(messages[1]!.content[0]).toEqual(expect.objectContaining({ type: 'textBlock', text: 'Pinned user two' }))
+      expect(messages[2]!.content[0]).toEqual(
+        expect.objectContaining({ type: 'textBlock', text: '[earlier conversation trimmed]' })
+      )
+      expect(messages[3]!.content[0]).toEqual(expect.objectContaining({ type: 'toolUseBlock', toolUseId: 'id-2' }))
     })
 
-    it('declines fallback when the first pinned message is an orphaned tool result', async () => {
+    it('synthesizes a leading anchor when the first pinned message is an orphaned tool result', async () => {
       const { pinMessage } = await import('../compression/pin-message.js')
       const manager = new SlidingWindowConversationManager({ windowSize: 2, shouldTruncateResults: false })
       const messages = [
@@ -1237,12 +1249,18 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // An orphaned tool result cannot be the retained user-first anchor.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // The pinned orphaned tool result cannot open the history, so the synthetic user
+      // anchor is inserted in front of it. The pin itself is honored and retained.
+      expect(result).toBe(true)
+      expect(messages[0]!.content[0]).toEqual(
+        expect.objectContaining({ type: 'textBlock', text: '[earlier conversation trimmed]' })
+      )
+      expect(messages[1]!.content[0]).toEqual(expect.objectContaining({ type: 'toolResultBlock', toolUseId: 'orphan' }))
+      expect(messages[3]!.content[0]).toEqual(expect.objectContaining({ type: 'toolResultBlock', toolUseId: 'id-2' }))
+      expect(messages).toHaveLength(4)
     })
 
-    it('declines fallback when the last pinned message carries a bare tool use block', () => {
+    it('synthesizes a seam anchor when the last pinned message carries a bare tool use block', () => {
       const manager = new SlidingWindowConversationManager({
         windowSize: 2,
         shouldTruncateResults: false,
@@ -1268,12 +1286,18 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // Role alone is insufficient: the pinned user contains an unpaired tool use.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // The pinned user carries an unpaired tool use, so it cannot be the anchor itself;
+      // a synthetic anchor lands at the seam after it and the recent pair stays intact.
+      expect(result).toBe(true)
+      expect(messages[0]!.content[0]).toEqual(expect.objectContaining({ type: 'toolUseBlock', toolUseId: 'weird-1' }))
+      expect(messages[1]!.content[0]).toEqual(
+        expect.objectContaining({ type: 'textBlock', text: '[earlier conversation trimmed]' })
+      )
+      expect(messages[3]!.content[0]).toEqual(expect.objectContaining({ type: 'toolResultBlock', toolUseId: 'id-2' }))
+      expect(messages).toHaveLength(4)
     })
 
-    it('declines fallback when no plain user message exists before the tool pair', () => {
+    it('synthesizes an anchor when no plain user message exists before the tool pair', () => {
       const manager = new SlidingWindowConversationManager({ windowSize: 2, shouldTruncateResults: false })
       const messages = [
         createToolResultMessage('orphan-0', 'Orphan result'),
@@ -1290,9 +1314,24 @@ describe('SlidingWindowConversationManager', () => {
         error: new ContextWindowOverflowError('Context overflow'),
       })
 
-      // startIndex=3 selects id-2, but all earlier user messages carry tool content.
-      expect(result).toBe(false)
-      expect(messages).toEqual(before)
+      // No plain user message exists anywhere: a synthetic anchor opens the history, the
+      // orphaned result is trimmed, and the newest pair survives intact.
+      expect(result).toBe(true)
+      expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
+      expect(messages[0]!.content[0]).toEqual(
+        expect.objectContaining({ type: 'textBlock', text: '[earlier conversation trimmed]' })
+      )
+      expect(messages[1]!.content[0]).toEqual(expect.objectContaining({ type: 'toolUseBlock', toolUseId: 'id-2' }))
+
+      // anchor + indivisible pair = 3 messages is the smallest valid history; a further
+      // reduction attempt has nothing left to remove and correctly refuses.
+      expect(
+        manager.reduce({
+          agent: createMockAgent({ messages }),
+          model: {} as Model,
+          error: new ContextWindowOverflowError('Context overflow'),
+        })
+      ).toBe(false)
     })
 
     it('allows trim when oldest message is text or other non-tool content', async () => {
