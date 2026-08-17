@@ -72,3 +72,23 @@ Key parity findings:
 - TS additionally stalls on S2/S4 (anchor decline — silent, debug-level only).
 - PY additionally emits provider-invalid assistant-first histories on S2/S7 (the exact problem the TS anchor was built to avoid), and hard-raises on S1 during reactive overflow recovery.
 - `echo` of the real error: run `node_modules/.bin/tsx sliding-window-dive/repro.ts` from repo root; `sliding-window-dive/.venv/bin/python sliding-window-dive/repro.py` (venv: uv venv + `uv pip install -e strands-py`).
+
+## C. Root cause — synthesis
+
+All four confirmed bugs share ONE structural root cause plus three local defects:
+
+**ROOT CAUSE — the trim search treats "reducible" as a property the history may lack, when the manager's contract requires it to be a property the algorithm guarantees.** Both SDKs search for a *pre-existing* safe boundary (a plain user message, or an adjacent `assistant(toolUse) → user(toolResult)` pair) at/after `startIndex`. Tool-heavy agentic histories routinely have neither: every user message carries toolResults, and pairs are non-adjacent whenever assistant text (or a fold from a concurrent fork) lands between the toolUse and its toolResult. When the search exhausts, both SDKs give up — but *giving up is not a valid outcome* for a window-enforcement manager: the caller has no recovery, so history grows without bound (TS paths 1/3, PY proactive) or the overflow error propagates (TS path 2, PY reactive raise). The fix must make reduction **total**: for any history longer than `windowSize` (with < everything pinned), a valid trim must exist — by *synthesizing* the anchor the search failed to find, instead of requiring one.
+
+**Local defect 1 — adjacency is an over-strict pairing test.** `_findToolPairTrimPoint` / `_find_tool_pair_trim_point` require the toolResult *immediately* after the toolUse. MuJoCo-style correctness: the provider constraint is only "every toolUse has its toolResult *somewhere later* and vice versa" — adjacency is incidental. Non-adjacent pairs (S1) are provider-valid histories that the search wrongly declares untrimmable.
+
+**Local defect 2 — TS anchor decline is silent + PY skips the anchor entirely.** The two SDKs each implement *half* of the right behavior. TS knows trimmed output must be user-first (`_findToolPairUserAnchor`) but returns `false` at debug level when no plain user exists (S2/S4) — silent unbounded growth. PY doesn't know about user-first at all: its fallback trims to the assistant(toolUse) boundary, emitting provider-invalid assistant-first histories (S2/S7) — the very 400-class failure `find_valid_trim_point`'s rule 1 exists to prevent. Neither considers that when no plain user anchor survives, a minimal placeholder user message (`[earlier conversation trimmed]`) satisfies the provider constraint by construction.
+
+**Local defect 3 — TS off-by-one.** When the anchor fallback succeeds, TS keeps `anchor + messages[toolPairIndex:]`, i.e. `windowSize + 1` messages, so `_applyManagement` re-fires every invocation (S7). The anchor must count against the window (trim to `windowSize - 1` tail + anchor, or equivalent).
+
+**Why the pin machinery is NOT the root cause (but constrains the fix):** `isPinned` partner-protection (toolUseId pairing) and `pinFirst` are correct; S5 ("all protected") is legitimately un-trimmable and must keep warning. The fix must keep pinned messages exempt and keep the pinned-prefix validity check — but a pinned prefix that is *not* user-first alternating should degrade to placeholder-anchor synthesis, not to decline (S4).
+
+**Invariants any fix must guarantee (checked by milestone E tests):**
+1. Totality: `len > windowSize` ∧ (∃ unpinned message in trim range) ⇒ reduction occurs.
+2. Provider validity: post-trim history starts with a `user` message whose content has no toolResult blocks; no orphaned toolUse/toolResult anywhere.
+3. Boundedness: post-trim `len ≤ windowSize`; repeated invocation is a fixed point, not a treadmill.
+4. Semantics preserved: `windowSize=0` keeps pinned-only; `pinFirst` prefix retained; pin partner-protection respected; reactive path (`error` set) still tries toolResult truncation first.
