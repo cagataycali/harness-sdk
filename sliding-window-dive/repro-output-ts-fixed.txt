@@ -1,0 +1,52 @@
+# repro.ts — SlidingWindowConversationManager, window=120
+
+## S1 no-plain-user + no-adjacent-pair (REAL CRASH SHAPE)
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=true after: len=119 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<56>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 2: reduced=true after: len=116 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<4>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 3: reduced=true after: len=113 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<4>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+## S2 adjacent pairs, no plain user anywhere (anchor missing)
+before: len=174 plainUserMsgs=0 windowSize=120
+round 1: reduced=true after: len=119 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<56> | no plain user anchor available, synthesizing trim anchor
+round 2: reduced=true after: len=117 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 3: reduced=true after: len=115 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+## S3 S1 + trailing orphaned toolUse
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=true after: len=119 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<56>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 2: reduced=true after: len=116 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<4>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 3: reduced=true after: len=113 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<4>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+## S4 pinFirst=2 over assistant-first prefix
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=true after: len=121 plainUserMsgs=2
+  log: DEBUG window_size=<120>, trim_index=<56> | no plain user anchor available, synthesizing trim anchor
+round 2: reduced=true after: len=120 plainUserMsgs=1
+round 3: reduced=true after: len=119 plainUserMsgs=2
+  log: DEBUG window_size=<120>, trim_index=<4> | no plain user anchor available, synthesizing trim anchor
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+## S7 plain agentic (anchor works) — off-by-one check
+before: len=174 plainUserMsgs=1 windowSize=120
+round 1: reduced=true after: len=120 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<55>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 2: reduced=true after: len=118 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+round 3: reduced=true after: len=116 plainUserMsgs=1
+  log: DEBUG window_size=<120>, trim_index=<3>, user_anchor_index=<0> | no plain user trim point, falling back to pair-safe boundary
+post-trim first message: role=user blocks=[textBlock] | over-window=false
+
+fixture written: fixtures/messages-174.json (174 messages)
