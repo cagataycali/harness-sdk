@@ -5,7 +5,7 @@
  * that preserves tool usage pairs and avoids invalid window states.
  */
 
-import { Message, TextBlock, ToolResultBlock, type ToolResultContent } from '../types/messages.js'
+import { Message, TextBlock, ToolResultBlock, type ToolResultContent, type ToolUseBlock } from '../types/messages.js'
 import { DocumentBlock, ImageBlock, VideoBlock } from '../types/media.js'
 import type { LocalAgent } from '../types/agent.js'
 import { AfterInvocationEvent } from '../hooks/events.js'
@@ -235,22 +235,31 @@ export class SlidingWindowConversationManager extends ConversationManager {
     const startIndex = messages.length <= this._windowSize ? 2 : messages.length - this._windowSize
     let trimIndex = findValidTrimPoint(messages, startIndex)
     let fallbackUserIndex: number | undefined
+    let synthesizeAnchor = false
 
     if (trimIndex === messages.length && this._windowSize > 0) {
-      const toolPairTrimIndex = this._findToolPairTrimPoint(messages, startIndex)
-      if (toolPairTrimIndex !== undefined) {
-        fallbackUserIndex = this._findToolPairUserAnchor(messages, toolPairTrimIndex)
+      // Fallback: no plain user trim point exists at/after startIndex. Find the nearest
+      // pair-safe boundary instead — a cut that splits no toolUse/toolResult pair, even
+      // when the pair is non-adjacent (assistant text interleaved between use and result).
+      // The search starts one past startIndex because the retained user anchor (found or
+      // synthesized below) occupies one slot of the window.
+      const boundary = this._findPairSafeBoundary(messages, startIndex + 1)
+      if (boundary < messages.length) {
+        fallbackUserIndex = this._findToolPairUserAnchor(messages, boundary)
         if (fallbackUserIndex !== undefined) {
           logger.debug(
-            `window_size=<${this._windowSize}>, trim_index=<${toolPairTrimIndex}>, user_anchor_index=<${fallbackUserIndex}> | no plain user trim point, falling back to complete tool pair`
+            `window_size=<${this._windowSize}>, trim_index=<${boundary}>, user_anchor_index=<${fallbackUserIndex}> | no plain user trim point, falling back to pair-safe boundary`
           )
-          trimIndex = toolPairTrimIndex
         } else {
+          // No plain user message survives the trim (and no valid pinned prefix exists).
+          // Synthesize a minimal user anchor after trimming instead of declining: declining
+          // leaves the history permanently above the window size.
+          synthesizeAnchor = true
           logger.debug(
-            `window_size=<${this._windowSize}>, trim_index=<${toolPairTrimIndex}> | complete tool pair found but no valid user anchor, declining fallback`
+            `window_size=<${this._windowSize}>, trim_index=<${boundary}> | no plain user anchor available, synthesizing trim anchor`
           )
-          return false
         }
+        trimIndex = boundary
       }
     }
 
@@ -280,6 +289,15 @@ export class SlidingWindowConversationManager extends ConversationManager {
     // Remove in reverse order to keep indices stable
     for (let i = indicesToRemove.length - 1; i >= 0; i--) {
       messages.splice(indicesToRemove[i]!, 1)
+    }
+
+    if (synthesizeAnchor) {
+      const first = messages[0]
+      const firstIsPlainUser =
+        first?.role === 'user' && !first.content.some((block) => block.type === 'toolResultBlock')
+      if (!firstIsPlainUser) {
+        messages.unshift(new Message({ role: 'user', content: [new TextBlock('[earlier conversation trimmed]')] }))
+      }
     }
     return true
   }
@@ -456,27 +474,44 @@ export class SlidingWindowConversationManager extends ConversationManager {
   }
 
   /**
-   * Find the first complete tool use/result pair at or after the starting index.
+   * Find the nearest pair-safe boundary at or after the starting index.
+   *
+   * A boundary `k` is pair-safe when trimming `messages[0:k)` splits no tool
+   * use/result pair: every toolResult kept at `[k:]` has its toolUse kept too.
+   * Unlike an adjacency scan, this accepts non-adjacent pairs (assistant text
+   * interleaved between a toolUse and its toolResult), which are provider-valid
+   * histories. A toolResult whose toolUse is missing from the history entirely
+   * also blocks the boundary, since keeping it would orphan it.
    *
    * @param messages - The conversation message history.
    * @param startIndex - The index to begin searching from.
-   * @returns The assistant message index that starts the pair, or undefined if none exists.
+   * @returns The first pair-safe index, or `messages.length` if none exists.
    */
-  private _findToolPairTrimPoint(messages: Message[], startIndex: number): number | undefined {
-    for (let index = startIndex; index < messages.length; index++) {
-      const message = messages[index]
-      if (!message) break
-      const nextMessage = messages[index + 1]
-      const hasToolUse = message.role === 'assistant' && message.content.some((block) => block.type === 'toolUseBlock')
-      const hasFollowingToolResult =
-        nextMessage?.role === 'user' && nextMessage.content.some((block) => block.type === 'toolResultBlock')
-
-      if (hasToolUse && hasFollowingToolResult) {
-        return index
+  private _findPairSafeBoundary(messages: Message[], startIndex: number): number {
+    const useIndex = new Map<string, number>()
+    const resultIndex = new Map<string, number>()
+    for (let i = 0; i < messages.length; i++) {
+      for (const block of messages[i]!.content) {
+        if (block.type === 'toolUseBlock') {
+          useIndex.set((block as ToolUseBlock).toolUseId, i)
+        } else if (block.type === 'toolResultBlock') {
+          resultIndex.set((block as ToolResultBlock).toolUseId, i)
+        }
       }
     }
 
-    return undefined
+    boundary: for (let k = startIndex; k < messages.length; k++) {
+      for (const [toolUseId, resultIdx] of resultIndex) {
+        if (resultIdx < k) continue
+        const useIdx = useIndex.get(toolUseId)
+        if (useIdx === undefined || useIdx < k) {
+          continue boundary
+        }
+      }
+      return k
+    }
+
+    return messages.length
   }
 
   /**
