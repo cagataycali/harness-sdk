@@ -431,15 +431,27 @@ async function requestTimeoutExample() {
   // --8<-- [start:request_timeout]
   const bedrockModel = new BedrockModel({
     modelId: 'global.anthropic.claude-sonnet-4-6',
-    clientConfig: {
-      requestHandler: { requestTimeout: 60_000 },
-    },
+    requestTimeout: 600_000, // 10 minutes
   })
   // --8<-- [end:request_timeout]
   void bedrockModel
 }
 
 void requestTimeoutExample
+
+async function requestTimeoutHandlerOptionsExample() {
+  // --8<-- [start:request_timeout_handler_options]
+  const bedrockModel = new BedrockModel({
+    modelId: 'global.anthropic.claude-sonnet-4-6',
+    clientConfig: {
+      requestHandler: { requestTimeout: 600_000, connectionTimeout: 5_000 },
+    },
+  })
+  // --8<-- [end:request_timeout_handler_options]
+  void bedrockModel
+}
+
+void requestTimeoutHandlerOptionsExample
 
 async function structuredOutputExample() {
   // --8<-- [start:structured_output]
